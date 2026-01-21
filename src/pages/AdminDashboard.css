@@ -1,0 +1,198 @@
+/* AdminDashboard.css */
+:root {
+  --admin-sider-width: 260px;
+  --header-height: 64px;
+}
+
+.admin-layout {
+  height: 100%;
+  display: flex;
+  background: #f0f2f5;
+  overflow: hidden;
+}
+
+/* Sidebar Styling */
+.admin-sider {
+  width: var(--admin-sider-width);
+  background: #fff;
+  border-right: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.3s ease;
+  z-index: 1000;
+  height: 100%;
+}
+
+.admin-sider.mobile-hidden {
+  position: absolute;
+  transform: translateX(-100%);
+  box-shadow: none;
+}
+
+.admin-sider.mobile-visible {
+  position: absolute;
+  transform: translateX(0);
+  box-shadow: 4px 0 16px rgba(0,0,0,0.1);
+}
+
+.sider-header {
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #1e293b;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.admin-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+}
+
+/* Header Controls Bar */
+.controls-bar {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  padding: 1rem;
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 1rem;
+  align-items: center;
+  border-bottom: 1px solid #f0f0f0;
+  z-index: 50;
+  transition: all 0.3s ease;
+}
+
+.mobile-menu-btn {
+  display: none; /* Hidden on desktop */
+  font-size: 1.25rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  margin-right: 8px;
+}
+
+.stats-container {
+  display: flex;
+  gap: 2rem;
+  justify-content: flex-end;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stat-value {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: #0f172a;
+}
+
+/* Map specific tweaks */
+.map-wrapper {
+  flex: 1;
+  position: relative;
+  z-index: 0;
+}
+
+.leaflet-bottom {
+  z-index: 400; /* Ensure controls are above map but below overlays */
+}
+
+/* Users Table Container */
+.users-view-container {
+  padding: 24px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 768px) {
+  .admin-sider {
+    position: absolute;
+    height: 100%;
+  }
+  
+  /* Show hamburger on mobile */
+  .mobile-menu-btn {
+    display: inline-flex;
+  }
+
+  .admin-layout.sidebar-open .admin-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0,0,0,0.4);
+    z-index: 999;
+  }
+
+  /* Controls Bar Stack */
+  .controls-bar {
+    grid-template-columns: auto 1fr; /* Hamburger | Title/Selectors */
+    grid-template-rows: auto auto; /* Controls | Stats */
+    gap: 0.75rem;
+    padding: 0.75rem;
+  }
+
+  /* Make selectors full width or flexible */
+  .controls-inputs {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 0.5rem;
+    width: 100%;
+  }
+  
+  .controls-inputs .ant-select,
+  .controls-inputs .ant-picker {
+    flex: 1;
+  }
+
+  /* Stats Grid on Mobile */
+  .stats-container {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.5rem;
+    justify-content: center;
+    background: #f8fafc;
+    padding: 0.75rem;
+    border-radius: 8px;
+  }
+
+  .stat-value {
+    font-size: 0.9rem;
+  }
+  
+  .stat-label {
+    font-size: 0.65rem;
+  }
+
+  /* Users View */
+  .users-view-container {
+    padding: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+    .stats-container {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}

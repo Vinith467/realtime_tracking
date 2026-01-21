@@ -1,12 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { Layout, Menu, DatePicker, Select, Card, Spin, Typography, Table, Button, Alert } from 'antd';
-import { UserOutlined, DashboardOutlined, CalendarOutlined } from '@ant-design/icons';
+import { Menu, DatePicker, Select, Card, Typography, Table, Alert, Button } from 'antd';
+import { 
+    UserOutlined, 
+    DashboardOutlined, 
+    MenuOutlined,
+    CloseOutlined
+} from '@ant-design/icons';
 import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from 'react-leaflet';
 import dayjs from 'dayjs';
 import { db } from '../firebase';
-import { collection, query, where, getDocs, orderBy, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs, onSnapshot } from 'firebase/firestore';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import './AdminDashboard.css';
 
 // Icons fix
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
@@ -20,9 +26,8 @@ L.Icon.Default.mergeOptions({
   shadowUrl: markerShadow,
 });
 
-const { Sider, Content } = Layout;
 const { Option } = Select;
-const { Title } = Typography;
+const { Title, Text } = Typography;
 
 function FitBounds({ path }) {
   const map = useMap();
@@ -36,7 +41,7 @@ function FitBounds({ path }) {
 
 // Haversine formula to calculate distance in km
 const calculateDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371; // Radius of the earth in km
+  const R = 6371;
   const dLat = deg2rad(lat2 - lat1);
   const dLon = deg2rad(lon2 - lon1);
   const a =
@@ -57,45 +62,46 @@ const AdminDashboard = () => {
   const [selectedDate, setSelectedDate] = useState(dayjs());
   const [trackingPoints, setTrackingPoints] = useState([]);
   const [loading, setLoading] = useState(false);
-  // Separate loading for users list
   const [usersLoading, setUsersLoading] = useState(true);
   const [stats, setStats] = useState({ distance: '0.00', avgSpeed: '0.0', maxSpeed: '0.0', duration: '0s' });
   const [currentView, setCurrentView] = useState('1');
-
   const [dbError, setDbError] = useState(null);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  // Fetch users from Firestore with real-time updates
+  // Responsive: Close menu on view switch if mobile
+  const handleViewChange = (key) => {
+      setCurrentView(key);
+      if (window.innerWidth <= 768) {
+          setIsMobileMenuOpen(false);
+      }
+  };
+
+  // Fetch users
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, "users"), (snapshot) => {
         const fetchedUsers = [];
         snapshot.forEach((doc) => {
             fetchedUsers.push({ id: doc.id, ...doc.data() });
         });
-        console.log("Updated users list:", fetchedUsers);
         setUsers(fetchedUsers);
-        setDbError(null);
         setUsersLoading(false);
     }, (error) => {
         console.error("Error fetching users:", error);
         setDbError(error.message);
         setUsersLoading(false);
     });
-    
     return () => unsubscribe();
   }, []);
 
-  // Auto-select first user if none selected
+  // Auto-select
   useEffect(() => {
       if (users.length > 0 && !selectedUser) {
           setSelectedUser(users[0].id);
       }
   }, [users, selectedUser]);
 
-
-
-  // Subscribe to tracking data in real-time
+  // Track Data
   useEffect(() => {
-    // Only fetch tracking data if we are in the tracking view and have a user selected
     if (currentView !== '1') return;
     if (!selectedUser || !selectedDate) return;
     
@@ -103,7 +109,6 @@ const AdminDashboard = () => {
     const startOfDay = selectedDate.startOf('day').toDate();
     const endOfDay = selectedDate.endOf('day').toDate();
 
-    // Query tracking data for the selected user
     const q = query(
       collection(db, "tracking_data"),
       where("userId", "==", selectedUser)
@@ -119,28 +124,19 @@ const AdminDashboard = () => {
 
         snapshot.forEach((doc) => {
             const data = doc.data();
-            // Validate essential data existence
             if (data.location?.lat && data.location?.lng && data.timestamp?.toDate) {
                  const t = data.timestamp.toDate();
-                 // Client-side date filtering
                  if (t >= startOfDay && t <= endOfDay) {
                      rawData.push(data);
                  }
             }
         });
 
-        // Sort by timestamp to ensure the path is drawn correctly headers
-        rawData.sort((a, b) => {
-            const tA = a.timestamp.toDate().getTime();
-            const tB = b.timestamp.toDate().getTime();
-            return tA - tB;
-        });
+        rawData.sort((a, b) => a.timestamp.toDate().getTime() - b.timestamp.toDate().getTime());
 
-        // Process sorted data into points and stats
         rawData.forEach((data, index) => {
            points.push([data.location.lat, data.location.lng]);
-           
-           const speedKmh = (data.speed || 0) * 3.6; // Convert m/s to km/h
+           const speedKmh = (data.speed || 0) * 3.6;
            totalSpeed += speedKmh;
            if (speedKmh > maxSpd) maxSpd = speedKmh;
            count++;
@@ -160,12 +156,11 @@ const AdminDashboard = () => {
            const diffMs = endTime - startTime;
            const diffHours = Math.floor(diffMs / 3600000);
            const diffMins = Math.floor((diffMs % 3600000) / 60000);
-           const diffSecs = Math.floor((diffMs % 60000) / 1000);
            
            let durStr = '';
            if (diffHours > 0) durStr += `${diffHours}h `;
-           if (diffMins > 0) durStr += `${diffMins}m `;
-           durStr += `${diffSecs}s`;
+           durStr += `${diffMins}m`;
+           if (diffHours === 0 && diffMins === 0) durStr = '< 1m';
            
            setStats({
                 distance: totalDist.toFixed(2),
@@ -178,139 +173,162 @@ const AdminDashboard = () => {
         }
         setTrackingPoints(points);
         setLoading(false);
-    }, (error) => {
-        console.error("Error fetching live tracks:", error);
-        setLoading(false);
     });
 
     return () => unsubscribe();
   }, [selectedUser, selectedDate, currentView]);
 
-  // Columns for User Management Table
   const userColumns = [
     {
       title: 'Name',
       dataIndex: 'name',
       key: 'name',
-      render: (text) => <Typography.Text strong>{text || 'Unknown'}</Typography.Text>
+      render: (text) => <Text strong>{text || 'Unknown'}</Text>
     },
     {
       title: 'User ID',
       dataIndex: 'id',
       key: 'id',
-      render: (text) => <Typography.Text type="secondary">{text}</Typography.Text>
+      responsive: ['md'], // Hide on small mobile
+      render: (text) => <Text type="secondary">{text}</Text>
     },
     {
       title: 'Last Active',
       dataIndex: 'lastActive',
       key: 'lastActive',
-      render: (val) => val?.toDate ? dayjs(val.toDate()).format('YYYY-MM-DD HH:mm:ss') : 'N/A'
+      render: (val) => val?.toDate ? dayjs(val.toDate()).format('MM-DD HH:mm') : 'N/A'
     }
   ];
 
   return (
-    <Layout style={{ height: '100vh' }}>
-      <Sider width={250} theme="light" style={{ borderRight: '1px solid #f0f0f0' }}>
-        <div style={{ height: '64px', margin: '16px', display: 'flex', alignItems: 'center' }}>
-            <Title level={4} style={{ margin: 0 }}>Admin Panel</Title>
+    <div className={`admin-layout ${isMobileMenuOpen ? 'sidebar-open' : ''}`}>
+      
+      {/* Mobile Overlay */}
+      {isMobileMenuOpen && (
+          <div className="admin-overlay" onClick={() => setIsMobileMenuOpen(false)}></div>
+      )}
+
+      {/* Sidebar */}
+      <div className={`admin-sider ${isMobileMenuOpen ? 'mobile-visible' : 'mobile-hidden'}`}>
+        <div className="sider-header">
+           <span style={{ flex: 1 }}>Control Panel</span>
+           {isMobileMenuOpen && (
+               <Button type="text" icon={<CloseOutlined />} onClick={() => setIsMobileMenuOpen(false)} />
+           )}
         </div>
         <Menu
           mode="inline"
           selectedKeys={[currentView]}
-          onClick={({ key }) => setCurrentView(key)}
+          onClick={({ key }) => handleViewChange(key)}
+          style={{ borderRight: 0 }}
           items={[
-            { key: '1', icon: <DashboardOutlined />, label: 'Live Tracking / History' },
-            { key: '2', icon: <UserOutlined />, label: 'Users Management' },
+            { key: '1', icon: <DashboardOutlined />, label: 'Tracking' },
+            { key: '2', icon: <UserOutlined />, label: 'Users' },
           ]}
         />
-        <div style={{ padding: '16px' }}>
-             {/* Admin Controls */}
-        </div>
-      </Sider>
-      <Layout>
+      </div>
+
+      {/* Main Content */}
+      <div className="admin-main">
         {dbError && (
-            <Alert 
-                message="Database Connection Error" 
-                description={dbError} 
-                type="error" 
-                showIcon 
-                style={{ margin: '16px 16px 0' }}
-            />
+             <Alert message="Error" description={dbError} type="error" banner closable />
         )}
+
+        {/* Top Controls Bar (Only Visible for Tracking View) */}
         {currentView === '1' && (
-            <div style={{ padding: '16px', background: '#fff', display: 'flex', gap: '16px', alignItems: 'center', boxShadow: '0 2px 8px rgba(0,0,0,0.05)', zIndex: 10 }}>
-                <Select 
-                    value={selectedUser} 
-                    style={{ width: 200 }} 
-                    onChange={setSelectedUser}
-                    placeholder="Select User"
-                    notFoundContent="No users found"
-                >
-                    {users.map(u => <Option key={u.id} value={u.id}>{u.name || u.id}</Option>)}
-                </Select>
-                <DatePicker 
-                    defaultValue={selectedDate} 
-                    onChange={setSelectedDate}
-                    allowClear={false} 
-                />
-                
-                <div style={{ display: 'flex', gap: '20px', marginLeft: 'auto' }}>
-                    <div style={{ textAlign: 'center' }}>
-                        <Typography.Text type="secondary" style={{ fontSize: '12px' }}>Distance</Typography.Text>
-                        <div style={{ fontWeight: 'bold' }}>{stats.distance} km</div>
+            <div className="controls-bar">
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                    <button className="mobile-menu-btn" onClick={() => setIsMobileMenuOpen(true)}>
+                        <MenuOutlined />
+                    </button>
+                    <div className="controls-inputs">
+                        <Select 
+                            value={selectedUser} 
+                            onChange={setSelectedUser}
+                            placeholder="Rider"
+                            className="w-full"
+                        >
+                            {users.map(u => <Option key={u.id} value={u.id}>{u.name || u.id}</Option>)}
+                        </Select>
+                        <DatePicker 
+                            value={selectedDate} 
+                            onChange={setSelectedDate}
+                            allowClear={false} 
+                            style={{ minWidth: 120 }}
+                        />
                     </div>
-                    <div style={{ textAlign: 'center' }}>
-                        <Typography.Text type="secondary" style={{ fontSize: '12px' }}>Avg Speed</Typography.Text>
-                        <div style={{ fontWeight: 'bold' }}>{stats.avgSpeed} km/h</div>
+                </div>
+
+                {/* Stats */}
+                <div className="stats-container">
+                    <div className="stat-item">
+                        <span className="stat-label">Dist</span>
+                        <span className="stat-value">{stats.distance} <small>km</small></span>
                     </div>
-                    <div style={{ textAlign: 'center' }}>
-                        <Typography.Text type="secondary" style={{ fontSize: '12px' }}>Max Speed</Typography.Text>
-                        <div style={{ fontWeight: 'bold' }}>{stats.maxSpeed} km/h</div>
+                    <div className="stat-item">
+                        <span className="stat-label">Avg</span>
+                        <span className="stat-value">{stats.avgSpeed} <small>km/h</small></span>
                     </div>
-                    <div style={{ textAlign: 'center' }}>
-                        <Typography.Text type="secondary" style={{ fontSize: '12px' }}>Duration</Typography.Text>
-                        <div style={{ fontWeight: 'bold' }}>{stats.duration}</div>
+                     <div className="stat-item">
+                        <span className="stat-label">Max</span>
+                        <span className="stat-value">{stats.maxSpeed} <small>km/h</small></span>
+                    </div>
+                    <div className="stat-item">
+                        <span className="stat-label">Time</span>
+                        <span className="stat-value">{stats.duration}</span>
                     </div>
                 </div>
             </div>
         )}
 
-        <Content style={{ position: 'relative', height: '100%', overflow: 'hidden' }}>
-            {currentView === '1' ? (
+        {/* Header for Users View */}
+        {currentView === '2' && (
+             <div className="controls-bar">
+                 <div style={{ display: 'flex', alignItems: 'center' }}>
+                    <button className="mobile-menu-btn" onClick={() => setIsMobileMenuOpen(true)}>
+                        <MenuOutlined />
+                    </button>
+                    <Title level={4} style={{ margin: 0 }}>User Management</Title>
+                 </div>
+             </div>
+        )}
+
+        {/* View Content */}
+        {currentView === '1' ? (
+            <div className="map-wrapper">
                 <MapContainer center={[12.9716, 77.5946]} zoom={12} style={{ height: '100%', width: '100%' }}>
-                    <TileLayer
-                        url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-                    />
+                    <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
                     {trackingPoints.length > 0 && (
                         <>
-                            <Polyline positions={trackingPoints} color="blue" weight={4} />
+                            <Polyline positions={trackingPoints} color="#1890ff" weight={5} opacity={0.8} />
                             <Marker position={trackingPoints[0]}>
                                  <Popup>Start</Popup>
                             </Marker>
                             <Marker position={trackingPoints[trackingPoints.length - 1]}>
-                                 <Popup>End</Popup>
+                                 <Popup>Current/End</Popup>
                             </Marker>
                             <FitBounds path={trackingPoints} />
                         </>
                     )}
                 </MapContainer>
-            ) : (
-                <div style={{ padding: '24px', overflow: 'auto', height: '100%' }}>
-                   <Card title="Registered Users" bordered={false}>
-                       <Title level={5} style={{ marginBottom: 16 }}>Total Users: {users.length}</Title>
-                       <Table 
-                            loading={usersLoading}
-                            columns={userColumns} 
-                            dataSource={users} 
-                            rowKey="id" 
-                            pagination={{ pageSize: 10 }}
-                       />
-                   </Card>
-                </div>
-            )}
-        </Content>
-      </Layout>
-    </Layout>
+            </div>
+        ) : (
+            <div className="users-view-container">
+                <Card bordered={false} bodyStyle={{ padding: '0' }} style={{ background: 'transparent', boxShadow: 'none' }}>
+                    <Table 
+                        loading={usersLoading}
+                        columns={userColumns} 
+                        dataSource={users} 
+                        rowKey="id" 
+                        pagination={{ pageSize: 10 }}
+                        scroll={{ x: true }} // Horizontal scroll on mobile
+                        size="middle"
+                    />
+                </Card>
+            </div>
+        )}
+      </div>
+    </div>
   );
 };
 
