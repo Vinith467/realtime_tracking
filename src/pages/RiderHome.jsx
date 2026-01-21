@@ -1,11 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Layout, Switch, Typography, List, Card, message, Alert, Steps, Button, Spin } from 'antd';
-import { CheckCircleOutlined, ClockCircleOutlined, WifiOutlined, EnvironmentOutlined, DatabaseOutlined, ReloadOutlined } from '@ant-design/icons';
+import { message } from 'antd';
+import { 
+  WifiOutlined, 
+  EnvironmentOutlined, 
+  DatabaseOutlined, 
+  ReloadOutlined, 
+  PoweroffOutlined,
+  ClockCircleOutlined,
+  UserOutlined,
+  CheckCircleFilled,
+  CloseCircleFilled,
+  LoadingOutlined
+} from '@ant-design/icons';
 import { db } from '../firebase';
-import { collection, addDoc, serverTimestamp, query, where, getDocs, orderBy, setDoc, doc, limit, updateDoc } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, query, where, getDocs, setDoc, doc, limit, updateDoc } from 'firebase/firestore';
 import dayjs from 'dayjs';
-
-const { Title, Text } = Typography;
+import './RiderHome.css';
 
 const RiderHome = () => {
   // State
@@ -20,35 +30,68 @@ const RiderHome = () => {
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
-  const [historyError, setHistoryError] = useState(null);
+  const [currentSessionStart, setCurrentSessionStart] = useState(null);
+  const [activeDuration, setActiveDuration] = useState('00:00');
 
   // Refs
   const watchIdRef = useRef(null);
   const sessionDocIdRef = useRef(null);
+  const timerRef = useRef(null);
 
   // 1. Initial System Check
   useEffect(() => {
     runDiagnostics();
+    // Periodically refresh online status for network check
+    const interval = setInterval(() => {
+        setDiagnostics(prev => ({ ...prev, network: navigator.onLine ? 'ok' : 'error' }));
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
+
+  // Timer for active session
+  useEffect(() => {
+    if (status === 'online' && currentSessionStart) {
+        timerRef.current = setInterval(() => {
+            const now = dayjs();
+            const start = dayjs(currentSessionStart);
+            const diffMins = now.diff(start, 'minute');
+            const h = Math.floor(diffMins / 60);
+            const m = diffMins % 60;
+            setActiveDuration(`${h}h ${m}m`);
+        }, 60000); // Update every minute
+        // Initial set
+        const now = dayjs();
+        const start = dayjs(currentSessionStart);
+        const diffMins = now.diff(start, 'minute');
+        const h = Math.floor(diffMins / 60);
+        const m = diffMins % 60;
+        setActiveDuration(`${h}h ${m}m`);
+    } else {
+        clearInterval(timerRef.current);
+        setActiveDuration('00:00');
+    }
+    return () => clearInterval(timerRef.current);
+  }, [status, currentSessionStart]);
 
   const runDiagnostics = async () => {
     setDiagnostics({ network: 'checking', database: 'checking', gps: 'checking' });
     
-    // Check 1: Network (Basic)
+    // Check 1: Network
     const isOnline = navigator.onLine;
     setDiagnostics(prev => ({ ...prev, network: isOnline ? 'ok' : 'error' }));
 
-    // Check 2: Database (Ping)
+    // Check 2: Database
     try {
+        // Quick ping to Firestore
         await getDocs(query(collection(db, "users"), limit(1)));
         setDiagnostics(prev => ({ ...prev, database: 'ok' }));
     } catch (e) {
         console.error("Diagnostic DB fail:", e);
         setDiagnostics(prev => ({ ...prev, database: 'error' }));
-        setErrorMessage(`Database Error: ${e.message}`);
+        // Don't set main error message yet, just diagnostic
     }
 
-    // Check 3: GPS Permission
+    // Check 3: GPS
     if (!navigator.geolocation) {
         setDiagnostics(prev => ({ ...prev, gps: 'error' }));
     } else {
@@ -57,7 +100,7 @@ const RiderHome = () => {
             (err) => {
                 console.error("GPS Fail:", err);
                 setDiagnostics(prev => ({ ...prev, gps: 'error' }));
-                if (err.code === 1) message.error("GPS Permission Denied");
+                if (err.code === 1) message.error("GPS Permissions Missing");
             }
         );
     }
@@ -72,13 +115,12 @@ const RiderHome = () => {
 
   const fetchHistory = async () => {
     setHistoryLoading(true);
-    setHistoryError(null);
     try {
         const userId = userName.toLowerCase().replace(/\s+/g, '_');
         const q = query(
             collection(db, "tracking_sessions"), 
             where("userId", "==", userId),
-            limit(20)
+            limit(10) // Reduced limit for mobile view
         );
         const snapshot = await getDocs(q);
         const historyData = snapshot.docs.map(doc => {
@@ -88,7 +130,6 @@ const RiderHome = () => {
             
             let durationStr = data.duration || 'Incomplete';
             
-            // Calculate duration dynamically if completed
             if (end && start) {
                 const diffMins = end.diff(start, 'minute');
                 const h = Math.floor(diffMins / 60);
@@ -102,128 +143,101 @@ const RiderHome = () => {
             return {
                 id: doc.id,
                 start: start,
-                end: end || dayjs(),
+                status: data.status,
                 duration: durationStr
             };
         });
         
-        // Manual Sort: Newest First
         historyData.sort((a, b) => b.start.valueOf() - a.start.valueOf());
-
         setHistory(historyData);
     } catch (e) {
         console.error("History fetch error:", e);
-        if (e.code !== 'failed-precondition') {
-             setHistoryError(e.message);
-        }
     } finally {
         setHistoryLoading(false);
     }
   };
 
-
-  // 3. Toggle Logic
-  const handleToggle = async (checked) => {
+  // 3. Main Toggle Action
+  const handleToggle = async () => {
     setErrorMessage(null);
-    const validInternal = userName.trim() || `Rider_${Math.floor(Math.random() * 1000)}`;
-    if (!userName.trim()) {
-        setUserName(validInternal);
-        localStorage.setItem('rider_name', validInternal);
-    }
-    const userId = validInternal.toLowerCase().replace(/\s+/g, '_');
+    const isGoingOnline = status !== 'online';
 
-    if (checked) {
-        // GOING ONLINE
+    // Validation
+    const validName = userName.trim();
+    if (!validName) {
+        message.warning("Please enter your name first!");
+        // Shake animation could go here
+        return;
+    }
+    
+    // Save name if new
+    if (localStorage.getItem('rider_name') !== validName) {
+        localStorage.setItem('rider_name', validName);
+    }
+    const userId = validName.toLowerCase().replace(/\s+/g, '_');
+
+    if (isGoingOnline) {
+        // --- START TRACKING ---
         setLoading(true);
         setStatus('checking');
 
-        // Check diagnostics again
-        if (diagnostics.database === 'error' || diagnostics.gps === 'error') {
-            await runDiagnostics(); // Retry
-            if (diagnostics.database === 'error' || diagnostics.gps === 'error') {
-                 message.error("Cannot start: System checks failed. See diagnostics.");
+        // Quick Re-check
+        if (diagnostics.gps === 'error' || diagnostics.database === 'error') {
+             await runDiagnostics();
+             if (diagnostics.gps === 'error') {
+                 message.error("GPS Error: Please enable location services.");
                  setLoading(false);
+                 setStatus('offline');
                  return;
-            }
+             }
         }
 
         try {
             // A. Register User
-            try {
-                await setDoc(doc(db, "users", userId), {
-                    name: validInternal,
-                    lastActive: serverTimestamp(),
-                    type: 'rider_v2'
-                }, { merge: true });
-                localStorage.setItem('rider_name', validInternal);
-            } catch (e) {
-                console.error("Error saving user:", e);
-                if (e.code === 'permission-denied') {
-                    throw new Error("Database Permission Denied. Check Firestore Rules.");
-                } else if (e.code === 'unavailable') {
-                    message.warning("Network offline. Trying to save locally.");
-                } else {
-                    message.warning("Could not save user profile: " + e.message);
-                }
-            }
+            await setDoc(doc(db, "users", userId), {
+                name: validName,
+                lastActive: serverTimestamp(),
+                type: 'rider_v2'
+            }, { merge: true });
 
             // B. Create Session
-            let sessionRef;
-            try {
-                sessionRef = await addDoc(collection(db, "tracking_sessions"), {
-                    userId: userId,
-                    userName: validInternal,
-                    startTime: serverTimestamp(),
-                    status: 'active'
-                });
-                sessionDocIdRef.current = sessionRef.id;
-            } catch (e) {
-                console.error("Session creation failed:", e);
-                // Don't throw here, allow offline tracking to potentially queue? 
-                // Actually if session fails, tracking is pointless.
-                throw new Error("Could not create tracking session: " + e.message);
-            }
+            const sessionRef = await addDoc(collection(db, "tracking_sessions"), {
+                userId: userId,
+                userName: validName,
+                startTime: serverTimestamp(),
+                status: 'active'
+            });
+            sessionDocIdRef.current = sessionRef.id;
+            setCurrentSessionStart(new Date());
 
             // C. Start Watch
             const sessionId = `sess_${Date.now()}`;
-            
-            if (!navigator.geolocation) {
-                throw new Error("Geolocation not supported by this browser.");
-            }
-
             const watchId = navigator.geolocation.watchPosition(
                 async (pos) => {
                     const { latitude, longitude, speed, accuracy } = pos.coords;
-                    
-                    if (sessionRef?.id) {
-                        try {
-                             await addDoc(collection(db, "tracking_data"), {
-                                sessionId: sessionId,
-                                sessionDocId: sessionRef.id,
-                                userId: userId,
-                                userName: validInternal,
-                                location: { lat: latitude, lng: longitude },
-                                speed: speed,
-                                accuracy: accuracy,
-                                timestamp: serverTimestamp()
-                            });
-                        } catch (err) {
-                            console.error("Track Packet Drop:", err);
-                        }
-                    }
+                    // Fire and forget tracking point
+                    try {
+                         addDoc(collection(db, "tracking_data"), {
+                            sessionId: sessionId,
+                            sessionDocId: sessionRef.id,
+                            userId: userId,
+                            location: { lat: latitude, lng: longitude },
+                            speed: speed,
+                            accuracy: accuracy,
+                            timestamp: serverTimestamp()
+                        });
+                    } catch (err) { /* quiet fail for single packet */ }
                 },
                 (err) => {
                     console.error("GPS Watch Error:", err);
-                    message.error(`GPS Error (${err.code}): ${err.message}`);
-                    setStatus('error');
-                    setLoading(false);
+                    message.error("GPS Signal Lost");
                 },
                 { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
             );
             
             watchIdRef.current = watchId;
             setStatus('online');
-            message.success("On Duty: Tracking Started");
+            message.success("You are now ON DUTY");
 
         } catch (e) {
             console.error("Start Error:", e);
@@ -234,17 +248,16 @@ const RiderHome = () => {
         }
 
     } else {
-        // GOING OFFLINE
+        // --- STOP TRACKING ---
+        setLoading(true);
         if (watchIdRef.current) {
             navigator.geolocation.clearWatch(watchIdRef.current);
             watchIdRef.current = null;
         }
 
-        // Close session in DB
         if (sessionDocIdRef.current) {
              try {
-                 const sessionDoc = doc(db, "tracking_sessions", sessionDocIdRef.current);
-                 await updateDoc(sessionDoc, {
+                 await updateDoc(doc(db, "tracking_sessions", sessionDocIdRef.current), {
                      endTime: serverTimestamp(),
                      status: 'completed'
                  });
@@ -253,116 +266,140 @@ const RiderHome = () => {
              }
              sessionDocIdRef.current = null;
         }
-
-        setStatus('offline');
-        message.info("Off Duty");
         
-        // Small delay to allow DB update to propagate before fetching history
-        setTimeout(() => {
-            fetchHistory(); 
-        }, 1000);
+        setCurrentSessionStart(null);
+        setStatus('offline');
+        message.info("You are now OFF DUTY");
+        setLoading(false);
+        
+        setTimeout(fetchHistory, 1500);
     }
   };
 
-
   return (
-    <Layout style={{ height: '100%', background: '#fff', display: 'flex', flexDirection: 'column' }}>
-       
-       {/* 1. Header & Diagnostics */}
-       <div style={{ padding: '20px', background: status === 'online' ? '#f6ffed' : '#fafafa', borderBottom: '1px solid #f0f0f0' }}>
-           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-                <Title level={4} style={{ margin: 0 }}>Rider Console</Title>
-                <div style={{ display: 'flex', gap: '10px' }}>
-                     <CheckIcon status={diagnostics.network} icon={<WifiOutlined />} />
-                     <CheckIcon status={diagnostics.database} icon={<DatabaseOutlined />} />
-                     <CheckIcon status={diagnostics.gps} icon={<EnvironmentOutlined />} />
+    <div className="rider-container">
+        {/* Header */}
+        <header className="header-section">
+            <div className="header-top">
+                <div className="app-title">Rider App</div>
+                <div className={`status-badge ${status}`}>
+                    <div className="status-indicator"></div>
+                    {status === 'online' ? 'Online' : 'Offline'}
                 </div>
-           </div>
-           
-           {errorMessage && (
-               <Alert message="System Error" description={errorMessage} type="error" showIcon closable onClose={() => setErrorMessage(null)} style={{ marginBottom: '15px' }} />
-           )}
-
-           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '15px' }}>
-               <input 
-                  value={userName}
-                  onChange={(e) => setUserName(e.target.value)}
-                  placeholder="Enter Rider Name"
-                  disabled={status === 'online'}
-                  style={{ 
-                      padding: '10px 15px', 
-                      fontSize: '16px', 
-                      borderRadius: '8px', 
-                      border: '1px solid #d9d9d9',
-                      width: '100%',
-                      maxWidth: '300px',
-                      textAlign: 'center'
-                  }}
-               />
-               
-               <div style={{ position: 'relative' }}>
-                   <Switch 
-                      checked={status === 'online'}
-                      loading={loading}
-                      onChange={handleToggle}
-                      style={{ transform: 'scale(1.5)', marginTop: '5px' }}
-                   />
-               </div>
-               <Text type={status === 'online' ? 'success' : 'secondary'} strong>
-                   {status === 'online' ? '● ON DUTY (TRACKING)' : '○ OFF DUTY'}
-               </Text>
-           </div>
-       </div>
-
-       {/* 2. History List */}
-       <div style={{ flex: 1, padding: '20px', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <Title level={5} style={{ margin: 0 }}>Recent Sessions</Title>
-                <Button size="small" icon={<ReloadOutlined />} onClick={fetchHistory} loading={historyLoading} />
             </div>
-            {historyError ? (
-                <Alert 
-                    message="Failed to load history" 
-                    description={historyError} 
-                    type="error" 
-                    showIcon 
-                    action={
-                        <Button size="small" type="primary" onClick={fetchHistory}>
-                            Retry
-                        </Button>
-                    }
-                />
-            ) : (
-                <List
-                    loading={historyLoading}
-                    dataSource={history}
-                    renderItem={item => (
-                        <List.Item>
-                            <List.Item.Meta
-                                avatar={<ClockCircleOutlined />}
-                                title={item.start.format('MMM D, h:mm A')}
-                                description={`Duration: ${item.duration}`}
-                            />
-                        </List.Item>
-                    )}
-                    locale={{ emptyText: "No history found" }}
-                />
+            
+            <div className="rider-input-group">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgba(255,255,255,0.8)', marginBottom: '4px', fontSize: '0.85rem' }}>
+                    <UserOutlined /> RIDER NAME
+                </div>
+                {status === 'online' ? (
+                    <h2 className="rider-name-display">{userName}</h2>
+                ) : (
+                    <input 
+                        className="rider-name-input"
+                        placeholder="Enter your name..."
+                        value={userName}
+                        onChange={(e) => setUserName(e.target.value)}
+                    />
+                )}
+            </div>
+        </header>
+
+        {/* Main Controls */}
+        <div className="control-card">
+            {errorMessage && (
+                <div style={{ width: '100%', padding: '10px', background: '#fef2f2', color: '#ef4444', borderRadius: '8px', fontSize: '0.9rem', textAlign: 'center' }}>
+                    {errorMessage}
+                </div>
             )}
-       </div>
-    </Layout>
+
+            <div className="toggle-container">
+                <button 
+                    className={`duty-button ${status === 'online' ? 'stop' : 'start'}`}
+                    onClick={handleToggle}
+                    disabled={loading}
+                >
+                    {loading ? (
+                        <>
+                           <LoadingOutlined spin /> {status === 'online' ? 'Stopping...' : 'Starting...'}
+                        </>
+                    ) : (
+                        <>
+                           <PoweroffOutlined /> 
+                           {status === 'online' ? 'END SHIFT' : 'START SHIFT'}
+                        </>
+                    )}
+                </button>
+            </div>
+
+            <div className="diagnostics-row">
+                <DiagnosticItem label="Net" status={diagnostics.network} icon={<WifiOutlined />} />
+                <DiagnosticItem label="GPS" status={diagnostics.gps} icon={<EnvironmentOutlined />} />
+                <DiagnosticItem label="DB" status={diagnostics.database} icon={<DatabaseOutlined />} />
+            </div>
+        </div>
+
+        {/* Stats Row (only when online) */}
+        {status === 'online' && (
+            <div className="stats-grid">
+                <div className="stat-card">
+                    <span className="stat-label">Duration</span>
+                    <span className="stat-value">{activeDuration}</span>
+                </div>
+                <div className="stat-card">
+                    <span className="stat-label">Session Status</span>
+                    <span className="stat-value" style={{ color: '#10b981', fontSize: '1.2rem' }}>Active</span>
+                </div>
+            </div>
+        )}
+
+        {/* Recent History */}
+        <div className="history-section">
+            <div className="section-title">
+                Recent Shifts
+                <button className="refresh-btn" onClick={fetchHistory} disabled={historyLoading}>
+                    <ReloadOutlined spin={historyLoading} />
+                </button>
+            </div>
+
+            <div className="history-list">
+                {history.length === 0 ? (
+                    <div style={{ textAlign: 'center', color: '#94a3b8', padding: '2rem' }}>
+                        No recent history
+                    </div>
+                ) : (
+                    history.map(item => (
+                        <div key={item.id} className={`history-card ${item.duration === 'Incomplete' ? 'incomplete' : 'completed'}`}>
+                            <div className="history-info">
+                                <h4>{item.start.format('MMMM D')}</h4>
+                                <p>{item.start.format('h:mm A')}</p>
+                            </div>
+                            <div className="duration-pill">
+                                {item.duration}
+                            </div>
+                        </div>
+                    ))
+                )}
+            </div>
+        </div>
+    </div>
   );
 };
 
-// Helper for Diagnostic Icons
-const CheckIcon = ({ status, icon }) => {
-    let color = '#d9d9d9'; // pending
-    if (status === 'ok') color = '#52c41a';
-    if (status === 'error') color = '#ff4d4f';
-    if (status === 'checking') color = '#1890ff';
+// Sub-component for clean code
+const DiagnosticItem = ({ label, status, icon }) => {
+    let iconClass = 'diag-icon';
+    if (status === 'ok') iconClass += ' ok';
+    if (status === 'error') iconClass += ' error';
+    if (status === 'checking') iconClass += ' checking';
+
     return (
-        <span style={{ fontSize: '18px', color: color, background: '#fff', borderRadius: '50%', padding: '4px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
-            {icon}
-        </span>
+        <div className="diag-item">
+            <div className={iconClass}>
+                {status === 'checking' ? <LoadingOutlined /> : icon}
+            </div>
+            <span>{label}</span>
+        </div>
     );
 };
 
