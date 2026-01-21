@@ -37,18 +37,119 @@ const RiderHome = () => {
   const watchIdRef = useRef(null);
   const sessionDocIdRef = useRef(null);
   const timerRef = useRef(null);
+  
+  // New Refs for Tracking Improvements
+  const lastPositionTimeRef = useRef(0);
+  const trackingIntervalRef = useRef(null);
+  const wakeLockRef = useRef(null);
+
+  // --- Tracking Helpers ---
+
+  const requestWakeLock = async () => {
+    if ('wakeLock' in navigator) {
+        try {
+            wakeLockRef.current = await navigator.wakeLock.request('screen');
+            console.log("Wake Lock active");
+        } catch (err) {
+            console.warn("Wake Lock rejected:", err);
+        }
+    }
+  };
+  
+  const releaseWakeLock = async () => {
+    if (wakeLockRef.current) {
+        try {
+            await wakeLockRef.current.release();
+            wakeLockRef.current = null;
+            console.log("Wake Lock released");
+        } catch (e) { /* ignore */ }
+    }
+  };
+
+  const startTracking = (sessionId, sessionDocId, userId) => {
+    // 1. Clear existing if any
+    stopTracking();
+
+    // 2. Start Watcher
+    // maximumAge: 0 forces fresh GPS data. timeout 15s.
+    const options = { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 };
+    
+    // Define success callback
+    const success = (pos) => {
+      const { latitude, longitude, speed, accuracy } = pos.coords;
+      lastPositionTimeRef.current = Date.now();
+      
+      // Fire and forget write
+      try {
+        addDoc(collection(db, "tracking_data"), {
+          sessionId: sessionId,
+          sessionDocId: sessionDocId,
+          userId: userId,
+          location: { lat: latitude, lng: longitude },
+          speed: speed,
+          accuracy: accuracy,
+          timestamp: serverTimestamp()
+        });
+      } catch (err) { /* quiet fail */ }
+    };
+
+    // Define error callback
+    const error = (err) => {
+      console.error("GPS Watch Error:", err);
+      if (err.code === 1) {
+         message.error("GPS Permissions Denied");
+      }
+      // If other error, we rely on the heartbeat to retry
+    };
+
+    const watchId = navigator.geolocation.watchPosition(success, error, options);
+    watchIdRef.current = watchId;
+
+    // 3. Start Heartbeat (Fallback)
+    // Checks every 30s. If no update in last 30s, force getPosition
+    trackingIntervalRef.current = setInterval(() => {
+       const now = Date.now();
+       if (now - lastPositionTimeRef.current > 30000) {
+           console.log("Heartbeat: Force active position fetch");
+           navigator.geolocation.getCurrentPosition(success, error, options);
+       }
+    }, 30000);
+  };
+
+  const stopTracking = () => {
+    if (watchIdRef.current) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+    if (trackingIntervalRef.current) {
+        clearInterval(trackingIntervalRef.current);
+        trackingIntervalRef.current = null;
+    }
+  };
+
+  // --- Effects ---
 
   // 1. Initial System Check
   useEffect(() => {
     runDiagnostics();
-    // Periodically refresh online status for network check
     const interval = setInterval(() => {
         setDiagnostics(prev => ({ ...prev, network: navigator.onLine ? 'ok' : 'error' }));
     }, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  // Timer for active session
+  // 2. Wake Lock Visibility Handler
+  useEffect(() => {
+      const handleVisChange = async () => {
+          if (document.visibilityState === 'visible' && status === 'online') {
+              await requestWakeLock();
+          }
+      };
+      document.addEventListener('visibilitychange', handleVisChange);
+      return () => document.removeEventListener('visibilitychange', handleVisChange);
+  }, [status]);
+
+  // 3. Timer for active session
   useEffect(() => {
     if (status === 'online' && currentSessionStart) {
         timerRef.current = setInterval(() => {
@@ -58,8 +159,8 @@ const RiderHome = () => {
             const h = Math.floor(diffMins / 60);
             const m = diffMins % 60;
             setActiveDuration(`${h}h ${m}m`);
-        }, 60000); // Update every minute
-        // Initial set
+        }, 60000); 
+        
         const now = dayjs();
         const start = dayjs(currentSessionStart);
         const diffMins = now.diff(start, 'minute');
@@ -73,6 +174,15 @@ const RiderHome = () => {
     return () => clearInterval(timerRef.current);
   }, [status, currentSessionStart]);
 
+  // 4. Load History
+  useEffect(() => {
+    if (userName && diagnostics.database === 'ok') {
+        fetchHistory();
+    }
+  }, [userName, diagnostics.database, status]);
+
+  // --- Functions ---
+
   const runDiagnostics = async () => {
     setDiagnostics({ network: 'checking', database: 'checking', gps: 'checking' });
     
@@ -82,13 +192,11 @@ const RiderHome = () => {
 
     // Check 2: Database
     try {
-        // Quick ping to Firestore
         await getDocs(query(collection(db, "users"), limit(1)));
         setDiagnostics(prev => ({ ...prev, database: 'ok' }));
     } catch (e) {
         console.error("Diagnostic DB fail:", e);
         setDiagnostics(prev => ({ ...prev, database: 'error' }));
-        // Don't set main error message yet, just diagnostic
     }
 
     // Check 3: GPS
@@ -106,13 +214,6 @@ const RiderHome = () => {
     }
   };
 
-  // 2. Load History
-  useEffect(() => {
-    if (userName && diagnostics.database === 'ok') {
-        fetchHistory();
-    }
-  }, [userName, diagnostics.database, status]);
-
   const fetchHistory = async () => {
     setHistoryLoading(true);
     try {
@@ -120,7 +221,7 @@ const RiderHome = () => {
         const q = query(
             collection(db, "tracking_sessions"), 
             where("userId", "==", userId),
-            limit(10) // Reduced limit for mobile view
+            limit(10)
         );
         const snapshot = await getDocs(q);
         const historyData = snapshot.docs.map(doc => {
@@ -157,7 +258,6 @@ const RiderHome = () => {
     }
   };
 
-  // 3. Main Toggle Action
   const handleToggle = async () => {
     setErrorMessage(null);
     const isGoingOnline = status !== 'online';
@@ -166,11 +266,9 @@ const RiderHome = () => {
     const validName = userName.trim();
     if (!validName) {
         message.warning("Please enter your name first!");
-        // Shake animation could go here
         return;
     }
     
-    // Save name if new
     if (localStorage.getItem('rider_name') !== validName) {
         localStorage.setItem('rider_name', validName);
     }
@@ -192,6 +290,9 @@ const RiderHome = () => {
              }
         }
 
+        // Request Wake Lock
+        await requestWakeLock();
+
         try {
             // A. Register User
             await setDoc(doc(db, "users", userId), {
@@ -212,30 +313,8 @@ const RiderHome = () => {
 
             // C. Start Watch
             const sessionId = `sess_${Date.now()}`;
-            const watchId = navigator.geolocation.watchPosition(
-                async (pos) => {
-                    const { latitude, longitude, speed, accuracy } = pos.coords;
-                    // Fire and forget tracking point
-                    try {
-                         addDoc(collection(db, "tracking_data"), {
-                            sessionId: sessionId,
-                            sessionDocId: sessionRef.id,
-                            userId: userId,
-                            location: { lat: latitude, lng: longitude },
-                            speed: speed,
-                            accuracy: accuracy,
-                            timestamp: serverTimestamp()
-                        });
-                    } catch (err) { /* quiet fail for single packet */ }
-                },
-                (err) => {
-                    console.error("GPS Watch Error:", err);
-                    message.error("GPS Signal Lost");
-                },
-                { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
-            );
+            startTracking(sessionId, sessionRef.id, userId);
             
-            watchIdRef.current = watchId;
             setStatus('online');
             message.success("You are now ON DUTY");
 
@@ -243,6 +322,7 @@ const RiderHome = () => {
             console.error("Start Error:", e);
             setErrorMessage(e.message);
             setStatus('error');
+            releaseWakeLock();
         } finally {
             setLoading(false);
         }
@@ -250,10 +330,7 @@ const RiderHome = () => {
     } else {
         // --- STOP TRACKING ---
         setLoading(true);
-        if (watchIdRef.current) {
-            navigator.geolocation.clearWatch(watchIdRef.current);
-            watchIdRef.current = null;
-        }
+        stopTracking();
 
         if (sessionDocIdRef.current) {
              try {
@@ -271,6 +348,7 @@ const RiderHome = () => {
         setStatus('offline');
         message.info("You are now OFF DUTY");
         setLoading(false);
+        releaseWakeLock();
         
         setTimeout(fetchHistory, 1500);
     }
@@ -321,12 +399,12 @@ const RiderHome = () => {
                 >
                     {loading ? (
                         <>
-                           <LoadingOutlined spin /> {status === 'online' ? 'Stopping...' : 'Starting...'}
+                            <LoadingOutlined spin /> {status === 'online' ? 'Stopping...' : 'Starting...'}
                         </>
                     ) : (
                         <>
-                           <PoweroffOutlined /> 
-                           {status === 'online' ? 'END SHIFT' : 'START SHIFT'}
+                            <PoweroffOutlined /> 
+                            {status === 'online' ? 'END SHIFT' : 'START SHIFT'}
                         </>
                     )}
                 </button>
